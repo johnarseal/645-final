@@ -19,15 +19,7 @@ def computeHistFeature(wordMap, numFeat, mod):
     """
     
     """
-    1. copy wordMap onto device
-    """
-    """
-    wordMap_gpu = cuda.mem_alloc(wordMap.nbytes)
-    cuda.memcpy_htod(wordMap_gpu, wordMap)
-    """
-    
-    """
-    2. Define the variables needed
+    1. Define the variables needed
     """
     numPixel = wordMap.size
     numThreadsPerBlock = 128
@@ -36,7 +28,7 @@ def computeHistFeature(wordMap, numFeat, mod):
     histFeature = np.zeros((numFeat, ), dtype=np.int32)
     
     """
-    3. run the function
+    2. run the function
     """    
     count_hist_feat = mod.get_function("count_hist_feat")
     reduce_hist_feat = mod.get_function("reduce_hist_feat")
@@ -45,10 +37,9 @@ def computeHistFeature(wordMap, numFeat, mod):
     reduce_hist_feat(segHistFeature_gpu, cuda.InOut(histFeature), np.int32(numFeat), np.int32(numBlocks),
                     block=(numFeat,1,1))
     """
-    4. normalize and return
+    3. normalize and return
     """
-    histFeature = histFeature.astype(np.float32)
-    histFeature = histFeature / numPixel
+    histFeature = histFeature.astype(np.float32) / numPixel
     return histFeature
 
 
