@@ -42,13 +42,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <iostream>
-#include <iomanip>
+
 #include "kmeans.h"
 
-#include <thrust/host_vector.h>
-#include <thrust/device_vector.h>
-
+/*
 static inline int nextPowerOfTwo(int n) {
     n--;
 
@@ -60,7 +57,7 @@ static inline int nextPowerOfTwo(int n) {
 //  n = n >> 32 | n;    //  For 64-bit ints
 
     return ++n;
-}
+}*/
 
 /*----< euclid_dist_2() >----------------------------------------------------*/
 /* square of Euclid distance between two multi-dimensional points            */
@@ -85,7 +82,7 @@ float euclid_dist_2(int    numCoords,
 }
 
 /*----< find_nearest_cluster() >---------------------------------------------*/
-__global__ static
+__global__ 
 void find_nearest_cluster(int numCoords,
                           int numObjs,
                           int numClusters,
@@ -99,16 +96,13 @@ void find_nearest_cluster(int numCoords,
     //  The type chosen for membershipChanged must be large enough to support
     //  reductions! There are blockDim.x elements, one for each thread in the
     //  block.
-    unsigned char *membershipChanged = (unsigned char *)sharedMemory;
-    float *clusters = (float *)(sharedMemory + blockDim.x);
+    unsigned short *membershipChanged = (unsigned short *)sharedMemory;
+    float *clusters = (float *)(sharedMemory + blockDim.x * sizeof(unsigned short));
 
     membershipChanged[threadIdx.x] = 0;
 
-
     //  BEWARE: We can overrun our shared memory here if there are too many
     //  clusters or too many coordinates!
-    
-    // copy the devcie cluster to clusters
     for (int i = threadIdx.x; i < numClusters; i += blockDim.x) {
         for (int j = 0; j < numCoords; j++) {
             clusters[numClusters * j + i] = deviceClusters[numClusters * j + i];
@@ -146,9 +140,7 @@ void find_nearest_cluster(int numCoords,
 
         __syncthreads();    //  For membershipChanged[]
 
-        
         //  blockDim.x *must* be a power of two!
-        // compute reduction here
         for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
             if (threadIdx.x < s) {
                 membershipChanged[threadIdx.x] +=
@@ -163,226 +155,88 @@ void find_nearest_cluster(int numCoords,
     }
 }
 
-__global__ static
-void compute_delta(int *deviceIntermediates,
-                   int numIntermediates,    //  The actual number of intermediates
-                   int numIntermediates2)   //  The next power of two
+
+// blockDim must be PowerOfTwo
+__global__
+void compute_delta(int *srcIntermediates,   // The source to fetch the intermediates
+                   int *dstIntermediates,   // The destination to store the sum
+                   int numIntermediates)    //  The actual number of intermediates
 {
     //  The number of elements in this array should be equal to
     //  numIntermediates2, the number of threads launched. It *must* be a power
     //  of two!
-    //extern __shared__ unsigned int intermediates[];
+    extern __shared__ unsigned int intermediates[];
 
-    int t = blockDim.x * blockIdx.x + threadIdx.x;
-    
+    int tId = blockDim.x * blockIdx.x + threadIdx.x;
     //  Copy global intermediate values into shared memory.
-    /*
     intermediates[threadIdx.x] =
-        (threadIdx.x < numIntermediates) ? deviceIntermediates[threadIdx.x] : 0;
+        (tId < numIntermediates) ? srcIntermediates[tId] : 0;
+
     __syncthreads();
-    */
-    
-    
-    //  numIntermediates2 *must* be a power of two!
-    for (unsigned int s = numIntermediates2 / 2; s > 0; s >>= 1) {
-        if (t < s) {
-            deviceIntermediates[t] += deviceIntermediates[t + s];
+
+    //  blockDim.x *must* be a power of two!
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            intermediates[threadIdx.x] += intermediates[threadIdx.x + s];
         }
         __syncthreads();
     }
 
+    if (threadIdx.x == 0) {
+        dstIntermediates[blockIdx.x] = intermediates[0];
+    }
 }
 
-// print an M-by-N array
-template <typename T>
-void host_print(size_t m, size_t n, T* data, int w=8)
+
+// blockDim must be PowerOfTwo
+__global__
+void update_centroids_clusterSize(float *objects,           //  [numCoords][numObjs]
+                    int *membership,          //  [numObjs]
+                   float *centroids,    //  [numBlks][numCoords][numClusters]
+                   int *clusterSize, // [numBlks][numClusters]
+                   int numCoords, int numObjs, int numClusters)
 {
-  for(size_t i = 0; i < m; i++)
-  {
-    for(size_t j = 0; j < n; j++)
-      std::cout << std::setprecision(3) << std::setw(w) << data[i * n + j] << " ";
-    std::cout << "\n";
-  }
+    int tId = blockDim.x * blockIdx.x + threadIdx.x;
+    if(tId < numObjs){
+        int index = membership[tId];
+        // update cluster size
+        atomicAdd(&clusterSize[blockIdx.x*numClusters + index],1);
+        for(int j = 0; j < numCoords; j++){
+            int data_index = blockIdx.x*numCoords*numClusters+j*numClusters+index;
+            int object_index = j*numObjs+tId;
+            atomicAdd(&centroids[data_index],objects[object_index]);
+        }
+    }
 }
 
-#define TH_RAW(p)  thrust::raw_pointer_cast(&p[0])
-/*----< cuda_kmeans() >-------------------------------------------------------*/
-//
-//  ----------------------------------------
-//  DATA LAYOUT
-//
-//  objects         [numObjs][numCoords]
-//  clusters        [numClusters][numCoords]
-//  dimObjects      [numCoords][numObjs]
-//  dimClusters     [numCoords][numClusters]
-//  newClusters     [numCoords][numClusters]
-//  deviceObjects   [numCoords][numObjs]
-//  deviceClusters  [numCoords][numClusters]
-//  ----------------------------------------
-//
-/* return an array of cluster centers of size [numClusters][numCoords]       */
-float** cuda_kmeans(float **objects,      /* in: [numObjs][numCoords] */
-                   int     numCoords,    /* no. features */
-                   int     numObjs,      /* no. objects */
-                   int     numClusters,  /* no. clusters */
-                   float   threshold,    /* % objects change membership */
-                   int    *membership,   /* out: [numObjs] */
-                   int    *loop_iterations)
+/*
+To be launched in 1 block, block size of numClusters
+*/
+__global__
+void reduce_clusterSize(int *srcClusterSize, //  [numSrcBlks][numClusters]
+                   int *dstClusterSize, // [numClusters]
+                   int numSrcBlks, int numClusters){
+    int tx = threadIdx.x;
+    for(int i=0; i < numSrcBlks; i++){
+        dstClusterSize[tx] += srcClusterSize[i*numClusters+tx];
+    }     
+}
+
+/*
+To be launched in numCoords block, block size of numClusters
+*/
+__global__
+void reduce_centroids(float *srcCentroids,  //  [numSrcBlks][numCoords][numClusters]
+                    float *dstCentroids,          //  [numCoords][numClusters]
+                    int *clusterSize,       //     [numClusters]
+                    int numSrcBlks, int numClusters, int numCoords)
 {
-    int      i, j, index, loop=0;
-    int     *newClusterSize; /* [numClusters]: no. objects assigned in each
-                                new cluster */
-    float    delta;          /* % of objects change their clusters */
-    float  **dimObjects;
-    float  **clusters;       /* out: [numClusters][numCoords] */
-    float  **dimClusters;
-    float  **newClusters;    /* [numCoords][numClusters] */
-
-    float *deviceObjects;
-    float *deviceClusters;
-    int *deviceMembership;
-    int *deviceIntermediates;
-
-    //  Copy objects given in [numObjs][numCoords] layout to new
-    //  [numCoords][numObjs] layout
-    malloc2D(dimObjects, numCoords, numObjs, float);
-    for (i = 0; i < numCoords; i++) {
-        for (j = 0; j < numObjs; j++) {
-            dimObjects[i][j] = objects[j][i];
-        }
+    int bx = blockIdx.x;
+    int tx = threadIdx.x;
+    for(int i = 0; i < numSrcBlks; i++){
+        dstCentroids[bx*numClusters+tx] += srcCentroids[i*numCoords*numClusters+bx*numClusters+tx];
     }
-
-    /* pick first numClusters elements of objects[] as initial cluster centers*/
-    malloc2D(dimClusters, numCoords, numClusters, float);
-    for (i = 0; i < numCoords; i++) {
-        for (j = 0; j < numClusters; j++) {
-            dimClusters[i][j] = dimObjects[i][j];
-        }
-    }
-
-    /* initialize membership[] */
-    for (i=0; i<numObjs; i++) membership[i] = -1;
-
-    /* need to initialize newClusterSize and newClusters[0] to all 0 */
-    newClusterSize = (int*) calloc(numClusters, sizeof(int));
-    assert(newClusterSize != NULL);
-
-    malloc2D(newClusters, numCoords, numClusters, float);
-    memset(newClusters[0], 0, numCoords * numClusters * sizeof(float));
-
-    //  To support reduction, numThreadsPerClusterBlock *must* be a power of
-    //  two, and it *must* be no larger than the number of bits that will
-    //  fit into an unsigned char, the type used to keep track of membership
-    //  changes in the kernel.
-    const unsigned int numThreadsPerClusterBlock = 128;
-    const unsigned int numClusterBlocks =
-        (numObjs + numThreadsPerClusterBlock - 1) / numThreadsPerClusterBlock;
-    const unsigned int clusterBlockSharedDataSize =
-        numThreadsPerClusterBlock * sizeof(unsigned char) +
-        numClusters * numCoords * sizeof(float);
-
-    const unsigned int numReductionThreads =
-        nextPowerOfTwo(numClusterBlocks);
-    const unsigned int reductionBlockSharedDataSize =
-        numReductionThreads * sizeof(unsigned int);
-
-    
-    // define the block dim to do reduction
-    const unsigned int numThreadsPerReductionBlock = 128;
-    const unsigned int numReductionBlocks = 
-        (numReductionThreads + numThreadsPerReductionBlock - 1) / numThreadsPerReductionBlock;    
-        
-        
-        
-    checkCuda(cudaMalloc(&deviceObjects, numObjs*numCoords*sizeof(float)));
-    checkCuda(cudaMalloc(&deviceClusters, numClusters*numCoords*sizeof(float)));
-    checkCuda(cudaMalloc(&deviceMembership, numObjs*sizeof(int)));
-    
-    
-    checkCuda(cudaMemcpy(deviceObjects, dimObjects[0],
-              numObjs*numCoords*sizeof(float), cudaMemcpyHostToDevice));
-    checkCuda(cudaMemcpy(deviceMembership, membership,
-              numObjs*sizeof(int), cudaMemcpyHostToDevice));  
-    
-    thrust::device_vector<int> thDeviceIntermediates(numClusterBlocks);
-    
-    do {
-        checkCuda(cudaMemcpy(deviceClusters, dimClusters[0],
-                  numClusters*numCoords*sizeof(float), cudaMemcpyHostToDevice));        
-                  
-        find_nearest_cluster
-            <<< numClusterBlocks, numThreadsPerClusterBlock, clusterBlockSharedDataSize >>>
-            (numCoords, numObjs, numClusters,
-             deviceObjects, deviceClusters, deviceMembership, TH_RAW(thDeviceIntermediates));
-
-        cudaDeviceSynchronize(); checkLastCudaError();
-        
-        int d = thrust::reduce(thDeviceIntermediates.begin(), thDeviceIntermediates.end());
-        cudaDeviceSynchronize(); checkLastCudaError();
-
-        delta = (float)d;
-
-        checkCuda(cudaMemcpy(membership, deviceMembership,
-                  numObjs*sizeof(int), cudaMemcpyDeviceToHost));
-
-        for (i=0; i<numObjs; i++) {
-            /* find the array index of nestest cluster center */
-            index = membership[i];
-
-            /* update new cluster centers : sum of objects located within */
-            newClusterSize[index]++;
-            for (j=0; j<numCoords; j++)
-                newClusters[j][index] += objects[i][j];
-        }
-        
-        
-        //  TODO: Flip the nesting order
-        //  TODO: Change layout of newClusters to [numClusters][numCoords]
-        /* average the sum and replace old cluster centers with newClusters */
-        for (i=0; i<numClusters; i++) {
-            for (j=0; j<numCoords; j++) {
-                if (newClusterSize[i] > 0)
-                    dimClusters[j][i] = newClusters[j][i] / newClusterSize[i];
-                newClusters[j][i] = 0.0;   /* set back to 0 */
-            }
-            newClusterSize[i] = 0;   /* set back to 0 */
-        }
-
-        /*
-        printf("---------\n");
-        printf("iteration %d\n",loop);
-        printf("---------\n");
-        host_print(numCoords, numClusters, dimClusters[0]);
-        printf("---------\n");
-        break;
-        */
-        
-        delta /= numObjs;
-    } while (delta > threshold && loop++ < 500);
-
-    *loop_iterations = loop + 1;
-
-    /* allocate a 2D space for returning variable clusters[] (coordinates
-       of cluster centers) */
-    malloc2D(clusters, numClusters, numCoords, float);
-    for (i = 0; i < numClusters; i++) {
-        for (j = 0; j < numCoords; j++) {
-            clusters[i][j] = dimClusters[j][i];
-        }
-    }
-
-    checkCuda(cudaFree(deviceObjects));
-    checkCuda(cudaFree(deviceClusters));
-    checkCuda(cudaFree(deviceMembership));
-
-    free(dimObjects[0]);
-    free(dimObjects);
-    free(dimClusters[0]);
-    free(dimClusters);
-    free(newClusters[0]);
-    free(newClusters);
-    free(newClusterSize);
-
-    return clusters;
+    dstCentroids[bx*numClusters+tx] /= clusterSize[tx];
 }
+
 
