@@ -48,7 +48,7 @@ def kmeans(objects, numClusters, threshold):
     # For find_nearest_cluster
     threadsPer_FNC_Block = 128
     num_FNC_Blocks = int(math.ceil(float(numObjs) / threadsPer_FNC_Block))
-
+    # SDSize = shared memory size
     FNC_SDSize = threadsPer_FNC_Block * 2 + numClusters * numCoords * 4;
     # For compute_delta
     threadsPer_CD_Block = 128 if num_FNC_Blocks > 128 else nextPowerOfTwo(num_FNC_Blocks)
@@ -60,7 +60,7 @@ def kmeans(objects, numClusters, threshold):
     centroids_gpu = cuda.mem_alloc(centroids.nbytes)
     cuda.memcpy_htod(centroids_gpu, centroids)
     
-    _,interm_gpu = getHostDevicePair((num_FNC_Blocks,),np.int32,0)
+    _,interm_gpu = getHostDevicePair((num_FNC_Blocks,),np.int32,0) # interm means intermediate
     membership, membership_gpu = getHostDevicePair((numObjs,),np.int32,-1)  # initialize membership to -1     
     reduceInterm, reduceInterm_gpu = getHostDevicePair((num_CD_Blocks,),np.int32,0)
     clusterSize, clusterSize_gpu = getHostDevicePair((numClusters,),np.int32,0)
