@@ -13,15 +13,15 @@ def batchSampleConvolve(directory, alpha=200):
     """
     directory: directory of the images
     alpha: a constant, usually 200  
-    return mat: K * (alpha * 60) matrix. Where K is the number of images
+    return mat: (K * alpha) * 60 matrix. Where K is the number of images
     """
 
     imgPathList = []
-    for root, dirnames, filenames in os.walk('../data'):
+    for root, dirnames, filenames in os.walk(directory):
         for filename in fnmatch.filter(filenames, '*.jpg'):
             imgPathList.append(os.path.join(root, filename))
 
-    result = np.empty((len(imgPathList), alpha, 60))
+    result = np.empty((len(imgPathList) * alpha, 60))
 
     # Perfrom convolvution on each image
     for i, path in enumerate(imgPathList):
@@ -32,7 +32,7 @@ def batchSampleConvolve(directory, alpha=200):
         for j in range(alpha):
             rndIdx1 = np.random.randint(0, imgs.shape[0])
             rndIdx2 = np.random.randint(0, imgs.shape[1])
-            result[i][j] = imgs[rndIdx1][rndIdx2]
+            result[i*alpha+j] = imgs[rndIdx1][rndIdx2]
     
     print(result.shape)
     return result
