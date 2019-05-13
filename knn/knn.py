@@ -75,9 +75,11 @@ def generate_hist(dim, num):
         plt.hist(s, 30, normed=True) 
         data.append(s)
 
+def test_knn():
+    training_data = generate_hist(400, 1500)
+    test_data = generate_hist(400, 1)
+    knn(training_data, test_data)
 
 if __name__ == '__main__':
     # generate 
-    training_data = generate_hist(400, 1500)
-    test_data = generate_hist(400, 1)
     knn(training_data, test_data)
