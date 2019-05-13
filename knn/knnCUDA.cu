@@ -1,3 +1,12 @@
+/** Modifed version of knn-CUDA from https://github.com/vincentfpgarcia/kNN-CUDA
+ * The modifications are
+ *      removed texture memory usage
+ *      removed split query KNN computation
+ *      modified global distance computation
+ *
+ * Last modified by Lin Dong <ldong1@andrew.cmu.edu> 05/12/2019
+ */
+
 #include <cstdio>
 #include "cuda.h"
 
