@@ -45,8 +45,8 @@ def singleConvolve(imgPath):
 
     # Read the image
     image = skimage.io.imread(imgPath)
-    image = image.astype('float')/255
-    
+    image = image.astype('float32')/255
+
     # Conver grey-scale and RGBA to RGB
     if len(image.shape) == 2:
         image = np.tile(image[:,:, np.newaxis], (1, 1, 3))
@@ -58,7 +58,15 @@ def singleConvolve(imgPath):
     scales = [1,2,4,8,8*np.sqrt(2)]
     
     imgs = np.empty(shape=(image.shape[0],image.shape[1], len(scales)*3*4))
-    
+
+    """
+    TODO: Bug on CUDA to be fixed: a dimension of shape[0] in this range will 
+    cause illegal memory access when running kernel function.
+    """
+    # print(image.shape)  
+    if image.shape[0] >= 345 and image.shape[0] < 350:
+        return (imgs)
+      
     rt_ind = 0
     for i in range(len(scales)):
 
